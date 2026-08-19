@@ -21,6 +21,60 @@ function favicon () {
   return utils.extractFilename(config.get('application.favicon'))
 }
 
+function parseSafeStringLiteral (str: string): string | null {
+  if (str.length < 2) return null
+  const quote = str[0]
+  if (quote !== "'" && quote !== '"' && quote !== '`') return null
+  if (str[str.length - 1] !== quote) return null
+  if (quote === '`' && str.includes('${')) return null
+
+  let result = ''
+  for (let i = 1; i < str.length - 1; i++) {
+    if (str[i] === '\\') {
+      i++
+      if (i >= str.length - 1) return null
+      const nextChar = str[i]
+      switch (nextChar) {
+        case 'n': result += '\n'; break
+        case 'r': result += '\r'; break
+        case 't': result += '\t'; break
+        case 'b': result += '\b'; break
+        case 'f': result += '\f'; break
+        case 'v': result += '\v'; break
+        case '0': result += '\0'; break
+        case "'": result += "'"; break
+        case '"': result += '"'; break
+        case '`': result += '`'; break
+        case '\\': result += '\\'; break
+        default: result += nextChar
+      }
+    } else if (str[i] === quote) {
+      return null
+    } else {
+      result += str[i]
+    }
+  }
+  return result
+}
+
+function parseSafeExpression (code: string): string | null {
+  const stringLiteral = parseSafeStringLiteral(code)
+  if (stringLiteral !== null) {
+    return stringLiteral
+  }
+  if (/^[0-9+\-*/%().\s]+$/.test(code)) {
+    try {
+      return String(eval(code)) // eslint-disable-line no-eval
+    } catch {
+      return null
+    }
+  }
+  if (code === 'true' || code === 'false' || code === 'null') {
+    return code
+  }
+  return null
+}
+
 export function getUserProfile () {
   return async (req: Request, res: Response, next: NextFunction) => {
     let template: string
@@ -58,12 +112,16 @@ export function getUserProfile () {
         if (!code) {
           throw new Error('Username is null')
         }
-        username = eval(code) // eslint-disable-line no-eval
+        const safeVal = parseSafeExpression(code)
+        if (safeVal === null) {
+          throw new Error('Unsafe expression evaluation blocked')
+        }
+        username = safeVal
       } catch (err) {
-        username = '\\' + username
+        username = '\\\\' + username
       }
     } else {
-      username = '\\' + username
+      username = '\\\\' + username
     }
 
     const themeKey = config.get<string>('application.theme') as keyof typeof themes

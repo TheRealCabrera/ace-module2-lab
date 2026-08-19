@@ -7,11 +7,48 @@ import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import { type Request, type Response, type NextFunction } from 'express'
+import net from 'node:net'
+import dns from 'node:dns/promises'
 
 import * as security from '../lib/insecurity'
 import { UserModel } from '../models/user'
 import * as utils from '../lib/utils'
 import logger from '../lib/logger'
+
+function isPrivateIp (ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map(Number)
+    if (parts.length !== 4 || parts.some(isNaN)) {
+      return true
+    }
+    const [a, b, c, d] = parts
+    if (a === 127) return true
+    if (a === 10) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    if (a === 169 && b === 254) return true
+    if (a === 0) return true
+    if (a === 255 && b === 255 && c === 255 && d === 255) return true
+    return false
+  } else if (net.isIPv6(ip)) {
+    const normalized = ip.toLowerCase()
+    if (normalized === '::1' || normalized === '::') return true
+    if (normalized.startsWith('::ffff:')) {
+      const mappedIp = ip.substring(7)
+      return isPrivateIp(mappedIp)
+    }
+    const firstWord = normalized.split(':')[0]
+    if (firstWord) {
+      const firstWordHex = parseInt(firstWord, 16)
+      if (!isNaN(firstWordHex)) {
+        if ((firstWordHex & 0xfe00) === 0xfc00) return true
+        if ((firstWordHex & 0xffc0) === 0xfe80) return true
+      }
+    }
+    return false
+  }
+  return true
+}
 
 export function profileImageUrlUpload () {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -20,6 +57,38 @@ export function profileImageUrlUpload () {
       if (url.match(/(.)*solve\/challenges\/server-side(.)*/) !== null) req.app.locals.abused_ssrf_bug = true
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
       if (loggedInUser) {
+        let parsedUrl: URL
+        try {
+          parsedUrl = new URL(url)
+        } catch (err) {
+          next(new Error('Invalid URL format'))
+          return
+        }
+
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+          next(new Error('Only http and https protocols are allowed'))
+          return
+        }
+
+        const hostname = parsedUrl.hostname
+        if (!hostname) {
+          next(new Error('Invalid hostname'))
+          return
+        }
+
+        try {
+          const lookupResults = await dns.lookup(hostname, { all: true })
+          for (const entry of lookupResults) {
+            if (isPrivateIp(entry.address)) {
+              next(new Error('Access to private or local network addresses is forbidden'))
+              return
+            }
+          }
+        } catch (dnsErr) {
+          next(new Error('Could not resolve hostname'))
+          return
+        }
+
         try {
           const response = await fetch(url)
           if (!response.ok || !response.body) {
