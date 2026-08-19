@@ -17,6 +17,11 @@ export function b2bOrder () {
   return ({ body }: Request, res: Response, next: NextFunction) => {
     if (utils.isChallengeEnabled(challenges.rceChallenge) || utils.isChallengeEnabled(challenges.rceOccupyChallenge)) {
       const orderLinesData = body.orderLinesData || ''
+      if (!isSafeOrderLinesData(orderLinesData)) {
+        res.status(400)
+        next(new Error('Blocked by security policy'))
+        return
+      }
       try {
         const sandbox = { safeEval, orderLinesData }
         vm.createContext(sandbox)
@@ -35,6 +40,60 @@ export function b2bOrder () {
     } else {
       res.json({ cid: body.cid, orderNo: uniqueOrderNumber(), paymentDue: dateTwoWeeksFromNow() })
     }
+  }
+
+  function isSafeOrderLinesData (data: unknown): boolean {
+    if (typeof data !== 'string') {
+      return false
+    }
+    // Block dangerous characters that can be used for obfuscation or escaping
+    if (data.includes('\\') || data.includes('`') || data.includes('+')) {
+      return false
+    }
+
+    // Block dangerous words (case-insensitive)
+    const lowerData = data.toLowerCase()
+    const bannedWords = [
+      'process',
+      'require',
+      'child_process',
+      'exec',
+      'spawn',
+      'fs',
+      'import',
+      'global',
+      'globalthis',
+      'mainmodule',
+      'module',
+      'exports',
+      '__filename',
+      '__dirname',
+      'concat',
+      'join',
+      'slice',
+      'substring',
+      'substr',
+      'replace',
+      'fromcharcode',
+      'string',
+      'buffer',
+      'object',
+      'reflect',
+      'proxy',
+      'symbol',
+      'eval',
+      'function',
+      'callee',
+      'caller'
+    ]
+
+    for (const word of bannedWords) {
+      if (lowerData.includes(word)) {
+        return false
+      }
+    }
+
+    return true
   }
 
   function uniqueOrderNumber () {
